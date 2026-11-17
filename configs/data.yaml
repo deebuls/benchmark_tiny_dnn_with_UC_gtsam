@@ -1,0 +1,31 @@
+# Dataset and Synthetic Generation Configuration
+seed: 42
+img_width: 640
+img_height: 480
+
+camera:
+  fx: 460.0
+  fy: 460.0
+  cx: 320.0
+  cy: 240.0
+
+marker:
+  size_meters: 0.25
+  min_depth: 0.5
+  max_depth: 6.0
+  max_view_angle_deg: 75.0
+  min_visible_fraction: 0.3
+
+counts:
+  train: 200000
+  val: 10000
+  calib: 10000
+  smoke_train: 200
+  smoke_val: 50
+  smoke_calib: 50
+
+output_dirs:
+  train: "data/synth/train"
+  val: "data/synth/val"
+  calib: "data/synth/calib"
+  smoke: "data/synth/smoke"

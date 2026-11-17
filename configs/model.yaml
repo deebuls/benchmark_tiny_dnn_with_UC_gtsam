@@ -1,0 +1,22 @@
+# Model and Head Configurations
+grid_stride: 8
+input_size: [480, 640]  # [H, W] -> grid is [60, 80]
+
+backbone:
+  type: "resnet18"  # "resnet9", "resnet18", "resnet50"
+  pretrained: false
+  neck_channels: 128
+  head_channels: 128
+
+head:
+  type: "gaussian"  # "mse_fixed", "gaussian", "gaussian_beta", "student_t", "student_t_fixed", "cauchy"
+  beta_nll: 0.5     # Used when head is gaussian_beta
+  fixed_nu: 3.0     # Used when head is student_t_fixed
+  learned_nu_min: 1.01
+  log_scale_min: -7.0
+  log_scale_max: 5.0
+  full_covariance: false  # Optional diagonal vs full covariance ablation (disabled by default)
+  
+inference:
+  score_threshold: 0.3
+  nms_kernel_size: 3

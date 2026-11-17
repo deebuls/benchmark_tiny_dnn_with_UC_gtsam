@@ -1,0 +1,47 @@
+# Training Hyperparameters and Two-Stage Schedule
+seed: 42
+device: "cuda"
+
+batch_size: 8
+num_workers: 2
+pin_memory: true
+gradient_accumulation_steps: 4
+
+# Two-Stage Schedule:
+# Stage 1: Mean-only warm up (robust smooth L1, uncertainty head frozen)
+# Stage 2: Joint training (NLL heads active, initialized from stage 1 residual RMS)
+total_epochs: 30
+stage1_fraction: 0.2  # 20% of schedule
+freeze_backbone_stage1: false  # ablation flag
+
+optimizer:
+  type: "AdamW"
+  weight_decay: 0.01
+  lr_stage1:
+    backbone: 1.0e-4
+    neck_head: 5.0e-4
+  lr_stage2:
+    backbone: 5.0e-5
+    neck_head: 2.0e-4
+    uncertainty: 5.0e-4
+  clip_grad_norm: 5.0
+
+scheduler:
+  type: "cosine"
+  warmup_epochs: 1
+
+loss_weights:
+  objectness_focal: 1.0
+  regression_smooth_l1: 1.0
+  uncertainty_nll: 1.0
+  neighbor_weight: 0.0  # Optional weight for 8 neighboring cells around peak
+  azimuth: 1.0
+  elevation: 1.0
+  rho: 2.0  # Boost depth gradients
+
+ema:
+  enabled: true
+  decay: 0.999
+
+mixed_precision: true
+save_interval_epochs: 5

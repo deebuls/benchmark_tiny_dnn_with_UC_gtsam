@@ -1,0 +1,53 @@
+# Full Matrix Experiment Configuration
+output_file: "results.parquet"
+cache_dir: "results_cache"
+
+# Matrix Dimensions:
+heads:
+  - "gaussian"
+  - "gaussian_beta"
+  - "student_t"
+  - "student_t_fixed"
+  - "cauchy"
+  - "mse_fixed"
+
+backbones:
+  - "resnet9"
+
+seeds:
+  - 42
+
+modes:
+  - "A"  # Gaussian moment-matched
+  - "B"  # Native heavy-tailed IRLS
+
+tasks:
+  - "localization"  # Known landmark map
+  - "slam"          # Unknown landmark map
+
+association:
+  - "gated_nn"  # Gated nearest neighbor with likelihood gate
+  - "oracle"    # Upper bound
+
+odometry_noise_levels:
+  - 0.005  # 0.5% drift / distance
+  - 0.050  # 5.0%
+
+scenes:
+  - "room1_small_office"
+  - "room2_lab_narrow"
+  - "room3_square_hall"
+
+conditions:
+  - "nominal"
+  - "motion_blur"
+  - "low_light"
+  - "occlusion"
+  - "distractors"
+
+statistical_testing:
+  bootstrap_iterations: 1000
+  confidence_interval: 0.95
+  equivalence_margin_ate_pct: 0.15   # 15% margin for TOST / bootstrap
+  equivalence_margin_failure_pts: 5.0 # 5% absolute failure difference
+  failure_ate_threshold_m: 1.0       # Trajectory failure threshold
