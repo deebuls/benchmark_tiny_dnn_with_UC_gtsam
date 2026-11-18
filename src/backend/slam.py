@@ -1,4 +1,4 @@
-"""
+"""slam
 Factor-Graph Back-End Runner: Known Map Localization and SLAM.
 Integrates GTSAM factor graph optimization (Levenberg-Marquardt / iSAM2),
 custom robust weighting loops (Mode A and Mode B), and evaluation metrics (ATE, RPE, NEES).
@@ -70,10 +70,12 @@ def run_localization_known_map(
 
     # Add landmark observation factors via IRLS loop
     num_accepted_associations = 0
-    num_wrong_associations = 0
+    unique_landmarks_to_add = set() # Track unique landmarks for initialization
 
     factors_info = []
 
+    if oracle and gts_by_frame is not None:
+        print ("USING ORACLE NOT WHAT IS REQD")
     for f_idx in range(N):
         dets = detections_by_frame[f_idx]
         if not dets:
@@ -84,14 +86,48 @@ def run_localization_known_map(
             for d in dets:
                 for g in gts_by_frame[f_idx]:
                     if np.hypot(d["pixel_center"][0] - g["pixel_center"][0], d["pixel_center"][1] - g["pixel_center"][1]) < 20:
-                        factors_info.append((f_idx, int(g["marker_id"]), d))
+                        lm_id = int(g["marker_id"])
+                        factors_info.append((f_idx, lm_id, d))
+                        unique_landmarks_to_add.add(lm_id)
                         num_accepted_associations += 1
         else:
             # Gated data association
             matches = associator.associate_known_map(dets, poses_gt[f_idx], map_landmarks)
             for d_idx, lm_id in matches:
                 factors_info.append((f_idx, lm_id, dets[d_idx]))
+                unique_landmarks_to_add.add(lm_id)
                 num_accepted_associations += 1
+
+    # 1. INSERT UNIQUE LANDMARKS INTO INITIAL ESTIMATE FIRST
+    for lm_id in unique_landmarks_to_add:
+        if lm_id in map_landmarks:
+            lm_pt = map_landmarks[lm_id]
+            landmark_key = symbol('l', lm_id)
+            initial_estimate.insert(landmark_key, gtsam.Point3(lm_pt[0], lm_pt[1], lm_pt[2]))
+
+    # 2. NOW ADD THE FACTORS TO THE GRAPH
+    for f_idx, lm_id, det in factors_info:
+        pose_key = symbol('x', f_idx)
+        landmark_key = symbol('l', lm_id)
+
+        z_meas = np.array([det["azimuth"], det["elevation"], det["rho"]])
+        scales = np.array([det["scale_azimuth"], det["scale_elevation"], det["scale_rho"]])
+        nu = np.array([
+            det.get("nu_azimuth", 3.0),
+            det.get("nu_elevation", 3.0),
+            det.get("nu_rho", 3.0),
+        ])
+
+        factor = MarkerMeasurementFactor(
+            pose_key=pose_key,
+            landmark_key=landmark_key,
+            measurement=z_meas,
+            scale=scales,
+            mode=mode,
+            head_type=head_type,
+            nu=nu
+        )
+        graph.add(factor)
 
     # Solve using Levenberg-Marquardt optimizer
     params = gtsam.LevenbergMarquardtParams()
