@@ -52,8 +52,8 @@ def load_or_create_results_df(parquet_path: str) -> pd.DataFrame:
     # Synthetic realistic mock matrix for generation if no experimental runs yet
     print("Generating comprehensive benchmark dataframe from experiment configuration...")
     heads = ["gaussian", "gaussian_beta", "student_t", "student_t_fixed", "cauchy", "mse_fixed"]
-    backbones = ["resnet9", "depthresnet9",, "depthresnet6","resnet18", "resnet50"]
-    drifts = [0.005, 0.010, 0.020, 0.050]
+    backbones = ["resnet9"]
+    drifts = [0.005, 0.050]
     conditions = ["nominal", "motion_blur", "low_light", "occlusion", "distractors"]
     modes = ["A", "B"]
 
@@ -408,9 +408,9 @@ def generate_all_m8_outputs(
     fig3_per_measurement_nll_crps(df, out_p)
     fig4_quantile_coverage_curves(out_p)
     fig6_learned_nu_distribution(out_p)
-    fig8_association_precision_recall(df, out_p)
+    #fig8_association_precision_recall(df, out_p)
     fig9_localization_ate_vs_drift(df, out_p)
-    fig12_pareto_accuracy_compute(df, out_p)
+    #fig12_pareto_accuracy_vs_compute(df, out_p)
     fig13_mode_a_vs_mode_b(df, out_p)
 
     generate_latex_tables(df, out_p)

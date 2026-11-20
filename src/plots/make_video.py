@@ -170,10 +170,18 @@ def generate_experiment_video(
             dets = model.predict(t_img, score_threshold=0.3)[0]
         detections_by_frame.append(dets)
 
+    # 2. Simulate odometry at specified noise level
+    from src.blender.trajectory import simulate_odometry
+    rel_noisy, covs = simulate_odometry(poses_gt, noise_level=0.2)
+
     res = run_localization_known_map(
-        poses_gt[:N], odom["relative_poses"][:N-1], odom["covariances"][:N-1],
-        detections_by_frame, map_landmarks, mode=mode, head_type=head_type
+        poses_gt, rel_noisy, covs, detections_by_frame, map_landmarks,
+        mode=mode, head_type=head_type
     )
+    # res = run_localization_known_map(
+    #     poses_gt[:N], odom["relative_poses"][:N-1], odom["covariances"][:N-1],
+    #     detections_by_frame, map_landmarks, mode=mode, head_type=head_type
+    # )
     poses_est = res.get("estimated_poses", poses_gt[:N])
 
     # 4. Set up Video Writer

@@ -2,7 +2,7 @@
 
 PYTHON ?= python3
 HEAD ?= gaussian
-BACKBONE ?= resnet18
+BACKBONE ?= resnet9
 EPOCHS ?= 30
 SEED ?= 42
 MODE ?= B
@@ -72,11 +72,12 @@ eval-all:
 	for bb in resnet9 resnet18 resnet50; do \
 		for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
 			ckpt="checkpoints/$${bb}_$${head}_seed$(SEED)/model_final.pt"; \
+			out_json="checkpoints/$${bb}_$${head}_seed$(SEED)/eval_results.json"; \
 			if [ -f "$$ckpt" ]; then \
 				echo "============================================================"; \
 				echo ">>> Evaluating Backbone: $$bb | Head: $$head"; \
 				echo "============================================================"; \
-				PYTHONPATH=. $(PYTHON) src/eval/evaluate.py --checkpoint "$$ckpt" --data_dir $(VAL_DIR) --backbone $$bb --head $$head; \
+				PYTHONPATH=. $(PYTHON) src/eval/evaluate.py --checkpoint "$$ckpt" --data_dir $(VAL_DIR) --backbone $$bb --head $$head --out "$$out_json"; \
 			else \
 				echo "Skipping missing checkpoint: $$ckpt"; \
 			fi \
@@ -87,11 +88,12 @@ eval-all-heads:
 	@echo ">>> Evaluating all 6 heads on Backbone: $(BACKBONE)..."
 	for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
 		ckpt="checkpoints/$(BACKBONE)_$${head}_seed$(SEED)/model_final.pt"; \
+		out_json="checkpoints/$${BACKBONE}_$${head}_seed$(SEED)/eval_results.json"; \
 		if [ -f "$$ckpt" ]; then \
 			echo "============================================================"; \
 			echo ">>> Evaluating Backbone: $(BACKBONE) | Head: $$head"; \
 			echo "============================================================"; \
-			PYTHONPATH=. $(PYTHON) src/eval/evaluate.py --checkpoint "$$ckpt" --data_dir $(VAL_DIR) --backbone $(BACKBONE) --head $$head; \
+			PYTHONPATH=. $(PYTHON) src/eval/evaluate.py --checkpoint "$$ckpt" --data_dir $(VAL_DIR) --backbone $(BACKBONE) --head $$head --out "$$out_json"; \
 		else \
 			echo "Skipping missing checkpoint: $$ckpt"; \
 		fi \
