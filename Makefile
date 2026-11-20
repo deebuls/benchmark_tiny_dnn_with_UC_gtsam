@@ -100,6 +100,17 @@ eval-all-heads:
 backend:
 	$(PYTHON) scripts/run_stage.py --stage backend
 
+backend-ground-truth:
+	@echo ">>> Running Backend Factor Graph Localization on ALL 18 model combinations (Mode $(MODE))..."
+	for bb in resnet9 resnet18 resnet50; do \
+		for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
+			echo "============================================================"; \
+			echo ">>> Backend Localization: Backbone: $$bb | Head: $$head | Mode: $(MODE)"; \
+			echo "============================================================"; \
+			PYTHONPATH=. $(PYTHON) src/backend/slam.py --data_dir $(VAL_DIR) --mode $(MODE) --head $$head --backbone $$bb; \
+		done \
+	done
+
 backend-all:
 	@echo ">>> Running Backend Factor Graph Localization on ALL 18 model combinations (Mode $(MODE))..."
 	for bb in resnet9 resnet18 resnet50; do \
