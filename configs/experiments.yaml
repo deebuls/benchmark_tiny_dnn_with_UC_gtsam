@@ -30,20 +30,22 @@ association:
   - "oracle"    # Upper bound
 
 odometry_noise_levels:
-  - 0.005  # 0.5% drift / distance
-  - 0.050  # 5.0%
+  # - 0.005  # 0.5% drift / distance
+  # - 0.050  # 5.0%
+  - 0.1  # 10% drift / distance
+  - 0.2  # 20%
 
 scenes:
   - "room1_small_office"
-  - "room2_lab_narrow"
-  - "room3_square_hall"
+  # - "room2_lab_narrow"
+  # - "room3_square_hall"
 
 conditions:
   - "nominal"
-  - "motion_blur"
-  - "low_light"
-  - "occlusion"
-  - "distractors"
+  # - "motion_blur"
+  # - "low_light"
+  # - "occlusion"
+  # - "distractors"
 
 statistical_testing:
   bootstrap_iterations: 1000

@@ -122,3 +122,24 @@ class LandmarkTracker:
                 del self.tentative_landmarks[lm_id]
                 return True
         return False
+
+    # Inside LandmarkTracker in src/backend/association.py
+    def merge_nearby_landmarks(self) -> None:
+        """Merges confirmed landmarks within self.merge_dist meters."""
+        ids = list(self.confirmed_landmarks.keys())
+        merged_away = set()
+
+        for i, id_a in enumerate(ids):
+            if id_a in merged_away:
+                continue
+            p_a = self.confirmed_landmarks[id_a]
+            for id_b in ids[i + 1:]:
+                if id_b in merged_away:
+                    continue
+                p_b = self.confirmed_landmarks[id_b]
+                if np.linalg.norm(p_a - p_b) <= self.merge_dist:
+                    # Keep id_a and average positions
+                    p_a = 0.5 * (p_a + p_b)
+                    self.confirmed_landmarks[id_a] = p_a
+                    merged_away.add(id_b)
+                    del self.confirmed_landmarks[id_b]

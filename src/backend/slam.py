@@ -20,8 +20,155 @@ except ImportError:
 from src.backend.factors import MarkerMeasurementFactor
 from src.backend.association import DataAssociator, LandmarkTracker
 
+# Replacement core optimization & association block in run_localization_known_map
+from src.backend.factors import MarkerMeasurementFactor, make_gtsam_marker_factor
 
 def run_localization_known_map(
+    poses_gt: np.ndarray,
+    odometry_poses: np.ndarray,
+    odometry_covs: np.ndarray,
+    detections_by_frame: List[List[Dict[str, Any]]],
+    map_landmarks: Dict[int, np.ndarray],
+    mode: str = "B",
+    head_type: str = "student_t",
+    oracle: bool = False,
+    gts_by_frame: Optional[List[List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """
+    Runs factor-graph localization with a known landmark map.
+    Returns estimated trajectory and ATE (Absolute Trajectory Error).
+    """
+    N = len(poses_gt)
+    associator = DataAssociator(head_type=head_type)
+
+    initial_estimate = gtsam.Values()
+
+    odom_poses_world = np.zeros_like(poses_gt)
+    odom_poses_world[0] = poses_gt[0].copy()
+    for i in range(N - 1):
+        odom_poses_world[i + 1] = odom_poses_world[i] @ odometry_poses[i]
+
+    num_accepted_associations = 0
+    unique_landmarks_to_add = set()
+    factors_info = []
+
+    for f_idx in range(N):
+        dets = detections_by_frame[f_idx]
+        if not dets:
+            continue
+
+        if oracle and gts_by_frame is not None:
+            for d in dets:
+                for g in gts_by_frame[f_idx]:
+                    if np.hypot(
+                        d["pixel_center"][0] - g["pixel_center"][0],
+                        d["pixel_center"][1] - g["pixel_center"][1],
+                    ) < 20:
+                        lm_id = int(g["marker_id"])
+                        if lm_id in map_landmarks:
+                            factors_info.append((f_idx, lm_id, d))
+                            unique_landmarks_to_add.add(lm_id)
+                            num_accepted_associations += 1
+        else:
+            # Use accumulated odometry pose rather than ground truth
+            matches = associator.associate_known_map(dets, odom_poses_world[f_idx], map_landmarks)
+            for d_idx, lm_id in matches:
+                if lm_id in map_landmarks:
+                    factors_info.append((f_idx, lm_id, dets[d_idx]))
+                    unique_landmarks_to_add.add(lm_id)
+                    num_accepted_associations += 1
+
+    for lm_id in sorted(unique_landmarks_to_add):
+        lm_pt = map_landmarks[lm_id]
+        initial_estimate.insert(symbol("l", lm_id), gtsam.Point3(float(lm_pt[0]), float(lm_pt[1]), float(lm_pt[2])))
+
+# Build python factor wrappers once
+    marker_helpers: List[MarkerMeasurementFactor] = []
+    for f_idx, lm_id, det in factors_info:
+        z_meas = np.array([det["azimuth"], det["elevation"], det["rho"]], dtype=np.float64)
+        scales = np.array([det["scale_azimuth"], det["scale_elevation"], det["scale_rho"]], dtype=np.float64)
+        nu = np.array([
+            det.get("nu_azimuth", 3.0),
+            det.get("nu_elevation", 3.0),
+            det.get("nu_rho", 3.0),
+        ], dtype=np.float64)
+
+        marker_helpers.append(
+            MarkerMeasurementFactor(
+                pose_key=symbol("x", f_idx),
+                landmark_key=symbol("l", lm_id),
+                measurement=z_meas,
+                scale=scales,
+                mode=mode,
+                head_type=head_type,
+                nu=nu,
+            )
+        )
+
+# Base graph (prior + odometry)
+    base_graph = gtsam.NonlinearFactorGraph()
+    prior_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.01, 0.01, 0.01]))
+    T0 = gtsam.Pose3(gtsam.Rot3(poses_gt[0][:3, :3]), gtsam.Point3(poses_gt[0][:3, 3]))
+    base_graph.add(gtsam.PriorFactorPose3(symbol("x", 0), T0, prior_noise))
+    initial_estimate.insert(symbol("x", 0), T0)
+
+    curr_pose = poses_gt[0].copy()
+    for i in range(N - 1):
+        rel_T = odometry_poses[i]
+        curr_pose = curr_pose @ rel_T
+        pose_val = gtsam.Pose3(gtsam.Rot3(curr_pose[:3, :3]), gtsam.Point3(curr_pose[:3, 3]))
+        initial_estimate.insert(symbol("x", i + 1), pose_val)
+
+        odom_noise = gtsam.noiseModel.Gaussian.Covariance(odometry_covs[i])
+        rel_pose3 = gtsam.Pose3(gtsam.Rot3(rel_T[:3, :3]), gtsam.Point3(rel_T[:3, 3]))
+        base_graph.add(gtsam.BetweenFactorPose3(symbol("x", i), symbol("x", i + 1), rel_pose3, odom_noise))
+
+# IRLS outer loop (1 pass for Mode A/Gaussian, multiple passes for Mode B heavy-tailed)
+    irls_weights_list = [np.ones(3, dtype=np.float64) for _ in marker_helpers]
+    current_estimate = gtsam.Values(initial_estimate)
+    params = gtsam.LevenbergMarquardtParams()
+    num_irls_iters = 5 if (mode == "B" and head_type not in ["gaussian", "gaussian_beta", "mse_fixed"]) else 1
+
+    for _ in range(num_irls_iters):
+        iter_graph = gtsam.NonlinearFactorGraph(base_graph)
+        for helper, w_vec in zip(marker_helpers, irls_weights_list):
+            iter_graph.add(make_gtsam_marker_factor(helper, irls_weights=w_vec))
+
+        optimizer = gtsam.LevenbergMarquardtOptimizer(iter_graph, current_estimate, params)
+        current_estimate = optimizer.optimize()
+
+        if num_irls_iters > 1:
+            for idx, helper in enumerate(marker_helpers):
+                p_opt = current_estimate.atPose3(helper.pose_key)
+                l_opt = current_estimate.atPoint3(helper.landmark_key)
+                r_white, _, _ = helper.evaluate_residual(
+                    p_opt.matrix(),
+                    # np.array([l_opt.x(), l_opt.y(), l_opt.z()], dtype=np.float64),
+                    l_opt
+                )
+                irls_weights_list[idx] = helper.compute_irls_weight(r_white)
+
+    result = current_estimate
+    # Extract estimated poses
+    est_poses = np.zeros((N, 4, 4), dtype=np.float64)
+    for i in range(N):
+        p_opt = result.atPose3(symbol('x', i))
+        est_poses[i, :3, :3] = p_opt.rotation().matrix()
+        est_poses[i, :3, 3] = p_opt.translation()
+
+    # Compute ATE RMSE
+    trans_errs = np.linalg.norm(est_poses[:, :3, 3] - poses_gt[:, :3, 3], axis=-1)
+    ate_rmse = float(np.sqrt(np.mean(trans_errs**2)))
+
+    return {
+        "ate_rmse": ate_rmse,
+        "max_error": float(np.max(trans_errs)),
+        "accepted_associations": num_accepted_associations,
+        "num_frames": N,
+        "estimated_poses": est_poses,
+    }
+
+def old_run_localization_known_map(
     poses_gt: np.ndarray,
     odometry_poses: np.ndarray,
     odometry_covs: np.ndarray,
