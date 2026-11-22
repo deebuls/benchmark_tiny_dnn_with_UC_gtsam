@@ -172,8 +172,8 @@ class MarkerMeasurementFactor:
 
         # Whitened residual
         r_white = residual / eff_scale
-        H_pose_white = H_pose / eff_scale[:, None]
-        H_lm_white = H_lm / eff_scale[:, None]
+        H_pose_white = -H_pose / eff_scale[:, None]
+        H_lm_white = -H_lm / eff_scale[:, None]
 
         return r_white, H_pose_white, H_lm_white
 

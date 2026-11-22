@@ -2,8 +2,8 @@
 
 PYTHON ?= python3
 HEAD ?= gaussian
-BACKBONE ?= resnet9
-EPOCHS ?= 30
+BACKBONE ?= resnet18
+EPOCHS ?= 40
 SEED ?= 42
 MODE ?= B
 VAL_DIR ?= data/blender/room1_medium_nominal
@@ -23,18 +23,12 @@ synth:
 	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room2_lab_narrow   --density medium --condition nominal --frames 300 --out_dir data/blender/room2_lab_narrow
 	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room3_square_hall  --density medium --condition nominal --frames 300 --out_dir data/blender/room3_square_hall
 
-blender:
-	@echo ">>> Generating all 3 scenes in data/blender/..."
-	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room1_small_office --density medium --condition nominal --frames 300 --out_dir data/blender/room1_medium_nominal
-	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room2_lab_narrow   --density medium --condition nominal --frames 300 --out_dir data/blender/room2_lab_narrow
-	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room3_square_hall  --density medium --condition nominal --frames 300 --out_dir data/blender/room3_square_hall
-
 train:
 	$(PYTHON) scripts/train.py --head $(HEAD) --backbone $(BACKBONE) --epochs $(EPOCHS) --seed $(SEED)
 
 train-all:
 	@echo ">>> Training ALL 18 model combinations (6 heads x 3 backbones)..."
-	for bb in resnet9 resnet18 resnet50; do \
+	for bb in resnet50; do \
 		for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
 			echo "============================================================"; \
 			echo ">>> Training Backbone: $$bb | Head: $$head (Epochs: $(EPOCHS), Seed: $(SEED))"; \
@@ -55,7 +49,7 @@ train-all-heads:
 train-matrix-smoke:
 	@echo ">>> Training all heads on ResNet-9, ResNet-18, ResNet-50 (smoke)..."
 	for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
-		for bb in resnet9 resnet18 resnet50; do \
+		for bb in resnet9 resnet18; do \
 			echo ">>> Training $$bb with $$head..."; \
 			$(PYTHON) scripts/train.py --head $$head --backbone $$bb --epochs 6 --seed 42; \
 		done \
@@ -104,7 +98,7 @@ backend:
 
 backend-ground-truth:
 	@echo ">>> Running Backend Factor Graph Localization on ALL 18 model combinations (Mode $(MODE))..."
-	for bb in resnet9 resnet18 resnet50; do \
+	for bb in resnet9 resnet18; do \
 		for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
 			echo "============================================================"; \
 			echo ">>> Backend Localization: Backbone: $$bb | Head: $$head | Mode: $(MODE)"; \

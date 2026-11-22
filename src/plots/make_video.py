@@ -19,6 +19,7 @@ import torch
 
 from src.models.model import MarkerModel
 from src.backend.slam import run_localization_known_map
+from src.backend.slam_unkown import run_slam_unknown_map
 from src.common.geometry import DEFAULT_INTRINSICS, CameraIntrinsics
 
 
@@ -174,8 +175,12 @@ def generate_experiment_video(
     from src.blender.trajectory import simulate_odometry
     rel_noisy, covs = simulate_odometry(poses_gt, noise_level=0.2)
 
-    res = run_localization_known_map(
-        poses_gt, rel_noisy, covs, detections_by_frame, map_landmarks,
+    # res = run_localization_known_map(
+    #     poses_gt, rel_noisy, covs, detections_by_frame, map_landmarks,
+    #     mode=mode, head_type=head_type
+    # )
+    res = run_slam_unknown_map(
+        poses_gt, rel_noisy, covs, detections_by_frame,
         mode=mode, head_type=head_type
     )
     # res = run_localization_known_map(
@@ -183,6 +188,7 @@ def generate_experiment_video(
     #     detections_by_frame, map_landmarks, mode=mode, head_type=head_type
     # )
     poses_est = res.get("estimated_poses", poses_gt[:N])
+    print(f"ATE RSME : {res['ate_rmse']} , maxerror {res['max_error']}")
 
     # 4. Set up Video Writer
     # Total canvas: Camera View (640x480) + BEV Map (480x480) -> 1120 x 480

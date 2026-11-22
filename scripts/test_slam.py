@@ -1,7 +1,7 @@
 """
 M7: Experiment Matrix Runner.
 Drives localization and SLAM experiments across heads, backbones, seeds, back-end modes,
-odometry drift rates, and scenes using simulated observations from `meas_gt.jsonl`.
+odometry drift rates, and scenes.
 Outputs a single tidy `results.parquet` file with caching and resumability.
 """
 
@@ -12,85 +12,118 @@ from typing import Dict, Any
 import yaml
 import numpy as np
 import pandas as pd
+import torch
 
-from src.backend.slam import run_localization_known_map, run_slam_unknown_map
+from src.backend.slam import run_localization_known_map 
+from src.backend.slam_unkown import run_slam_unknown_map
 from src.eval.stats import tost_equivalence_test, compute_paired_bootstrap_ci
 
 
-def _resolve_obs_noise_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extracts observation noise parameters from `experiments.yaml` with sensible defaults.
-    Supports either a top-level `observation_noise` (or `obs_noise`) mapping or flat keys.
-    """
-    raw = cfg.get("observation_noise") or cfg.get("obs_noise") or {}
-    return {
-        "base_sigma_azimuth": float(raw.get("base_sigma_azimuth", raw.get("sigma_azimuth", 0.02))),
-        "base_sigma_elevation": float(raw.get("base_sigma_elevation", raw.get("sigma_elevation", 0.02))),
-        "base_sigma_rho": float(raw.get("base_sigma_rho", raw.get("sigma_rho", 0.05))),
-        "backbone_multipliers": raw.get(
-            "backbone_multipliers",
-            {"resnet50": 1.0, "resnet18": 1.2, "resnet9": 1.5},
-        ),
-        "head_multipliers": raw.get("head_multipliers", {}),
-        "condition_multipliers": raw.get("condition_multipliers", {}),
-        "noise_scale": float(raw.get("noise_scale", cfg.get("observation_noise_level", 1.0))),
-        "nu": float(raw.get("nu", 3.0)),
-        "min_rho": float(raw.get("min_rho", 0.1)),
-    }
-
-
-def simulate_observations_from_gt(
-    meas_gt_file: Path,
-    num_frames: int,
-    backbone: str,
+def _sample_head_noise(
+    rng: np.random.Generator,
     head: str,
-    condition: str,
-    seed: int,
-    obs_cfg: Dict[str, Any],
-) -> list:
-    """Simulates noisy detections from `meas_gt.jsonl` according to `experiments.yaml`."""
-    detections_by_frame = [[] for _ in range(num_frames)]
-    if not meas_gt_file.exists():
-        return detections_by_frame
+    scale: float,
+    nu: float,
+) -> float:
+    """Samples normalized noise from the specified distribution head."""
+    head_l = head.lower()
+    if head_l == "gaussian":
+        return float(rng.normal(0.0, 1.0) * scale)
+    elif head_l == "student_t":
+        df = max(nu, 1.001)
+        # Normalize variance for df > 2 so scale stays interpretable
+        var_norm = np.sqrt((df - 2.0) / df) if df > 2.0 else 1.0
+        return float(rng.standard_t(df) * scale * var_norm)
+    elif head_l == "cauchy":
+        return float(rng.standard_cauchy() * scale)
+    else:
+        return float(rng.normal(0.0, 1.0) * scale)
 
-    rng = np.random.default_rng(seed)
 
-    bb_mult = float(obs_cfg["backbone_multipliers"].get(backbone, 1.0))
-    head_mult = float(obs_cfg["head_multipliers"].get(head, 1.0))
-    cond_mult = float(obs_cfg["condition_multipliers"].get(condition, 1.0))
-    total_mult = obs_cfg["noise_scale"] * bb_mult * head_mult * cond_mult
+def _sample_fat_tail_outlier(
+    rng: np.random.Generator,
+    scale: float,
+    outlier_df: float,
+    outlier_scale: float,
+) -> float:
+    """Samples a very fat-tailed outlier value."""
+    eff_scale = scale * outlier_scale
+    if outlier_df <= 1.0:
+        return float(rng.standard_cauchy() * eff_scale)
+    return float(rng.standard_t(outlier_df) * eff_scale)
 
-    s_az = obs_cfg["base_sigma_azimuth"] * total_mult
-    s_el = obs_cfg["base_sigma_elevation"] * total_mult
-    s_rho = obs_cfg["base_sigma_rho"] * total_mult
-    nu = obs_cfg["nu"]
-    min_rho = obs_cfg["min_rho"]
 
-    with open(meas_gt_file, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            f_idx = int(item["frame_idx"])
-            if 0 <= f_idx < num_frames:
-                d_az = float(rng.normal(0.0, s_az)) if s_az > 0 else 0.0
-                d_el = float(rng.normal(0.0, s_el)) if s_el > 0 else 0.0
-                d_rho = float(rng.normal(0.0, s_rho)) if s_rho > 0 else 0.0
+def simulate_observation_noise(
+    item: Dict[str, Any],
+    rng: np.random.Generator,
+    head: str,
+    backbone: str,
+    obs_noise_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Simulates a noisy observation from a ground-truth entry in meas_gt.jsonl by combining:
+      1. Backbone uncertainty ordering (resnet9 highest -> resnet50 lowest)
+      2. Head distribution sampling (gaussian, student_t, cauchy)
+      3. Distance-dependent depth (rho) uncertainty
+      4. 10% (configurable) fat-tailed outliers across all 3 channels (azimuth, elevation, rho)
+    """
+    bb_mults = obs_noise_cfg.get(
+        "backbone_multipliers",
+        {"resnet9": 1.5, "resnet18": 1.2, "resnet50": 1.0},
+    )
+    default_bb_mult = 1.5 if backbone == "resnet9" else (1.2 if backbone == "resnet18" else 1.0)
+    bb_mult = float(bb_mults.get(backbone, default_bb_mult))
 
-                detections_by_frame[f_idx].append({
-                    "pixel_center": item["pixel_center"],
-                    "azimuth": float(item["azimuth"] + d_az),
-                    "elevation": float(item["elevation"] + d_el),
-                    "rho": float(max(min_rho, item["rho"] + d_rho)),
-                    "scale_azimuth": s_az,
-                    "scale_elevation": s_el,
-                    "scale_rho": s_rho,
-                    "nu_azimuth": nu,
-                    "nu_elevation": nu,
-                    "nu_rho": nu,
-                })
+    heads_cfg = obs_noise_cfg.get("heads", {})
+    h_cfg = heads_cfg.get(head, {})
 
-    return detections_by_frame
+    base_az = float(h_cfg.get("azimuth", obs_noise_cfg.get("azimuth", 0.02)))
+    base_el = float(h_cfg.get("elevation", obs_noise_cfg.get("elevation", 0.02)))
+    rho_base = float(h_cfg.get("rho_base", obs_noise_cfg.get("rho", 0.04)))
+    rho_dist_scale = float(h_cfg.get("rho_dist_scale", obs_noise_cfg.get("rho_dist_scale", 0.02)))
+    nu_val = float(h_cfg.get("nu", obs_noise_cfg.get("nu", 3.0)))
+
+    az_gt = float(item["azimuth"])
+    el_gt = float(item["elevation"])
+    rho_gt = float(item["rho"])
+
+    # Distance-dependent uncertainty on depth (higher distance -> higher uncertainty)
+    rho_dist_factor = 1.0 + rho_dist_scale * max(0.0, rho_gt)
+
+    s_az = base_az * bb_mult
+    s_el = base_el * bb_mult
+    s_rho = rho_base * bb_mult * rho_dist_factor
+
+    outlier_prob = float(obs_noise_cfg.get("outlier_prob", 0.10))
+    outlier_scale = float(obs_noise_cfg.get("outlier_scale", 8.0))
+    outlier_df = float(obs_noise_cfg.get("outlier_df", 1.0))
+
+    is_outlier = bool(rng.random() < outlier_prob)
+
+    if is_outlier:
+        # All three values sampled from a very fat-tailed distribution
+        d_az = _sample_fat_tail_outlier(rng, s_az, outlier_df, outlier_scale)
+        d_el = _sample_fat_tail_outlier(rng, s_el, outlier_df, outlier_scale)
+        d_rho = _sample_fat_tail_outlier(rng, s_rho, outlier_df, outlier_scale)
+    else:
+        # Nominal error based on the head's distribution + backbone & distance scaling
+        d_az = _sample_head_noise(rng, head, s_az, nu_val)
+        d_el = _sample_head_noise(rng, head, s_el, nu_val)
+        d_rho = _sample_head_noise(rng, head, s_rho, nu_val)
+
+    return {
+        "pixel_center": item["pixel_center"],
+        "azimuth": float(az_gt + d_az),
+        "elevation": float(el_gt + d_el),
+        "rho": float(max(0.1, rho_gt + d_rho)),
+        "scale_azimuth": float(s_az),
+        "scale_elevation": float(s_el),
+        "scale_rho": float(s_rho),
+        "nu_azimuth": float(nu_val),
+        "nu_elevation": float(nu_val),
+        "nu_rho": float(nu_val),
+        "is_outlier": is_outlier,
+    }
 
 
 def run_experiment_trial(
@@ -104,34 +137,52 @@ def run_experiment_trial(
     odometry_level: float,
     association: str,
     data_dir: str,
-    obs_cfg: Dict[str, Any],
+    checkpoint_dir: str = "checkpoints",
+    device: str = "cuda",
+    config_path: str = "configs/experiments.yaml",
 ) -> Dict[str, Any]:
-    """Runs a single experimental configuration trial using simulated observations."""
-    from src.blender.trajectory import simulate_odometry
+    """Runs a single experimental configuration trial using observation simulation from meas_gt.jsonl."""
+    _ = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
 
-    # 1. Load ground truth trajectory & map
+    # 1. Load ground truth trajectory & data
     p_data = Path(data_dir)
     poses_gt = np.load(str(p_data / "poses_gt.npy"))
     markers_gt = np.load(str(p_data / "markers_gt.npy"))
     map_landmarks = {int(m[0]): m[1:] for m in markers_gt}
 
-    # 2. Simulate noisy odometry at level from experiments.yaml
+    # 2. Simulate odometry at specified noise level from experiments.yaml
+    from src.blender.trajectory import simulate_odometry
     rel_noisy, covs = simulate_odometry(poses_gt, noise_level=odometry_level, seed=seed)
 
-    # 3. Simulate noisy observations solely from meas_gt.jsonl
-    N = len(poses_gt)
-    meas_gt_file = p_data / "meas_gt.jsonl"
-    detections_by_frame = simulate_observations_from_gt(
-        meas_gt_file=meas_gt_file,
-        num_frames=N,
-        backbone=backbone,
-        head=head,
-        condition=condition,
-        seed=seed,
-        obs_cfg=obs_cfg,
-    )
+    # 3. Load observation noise configuration from experiments.yaml
+    obs_noise_cfg: Dict[str, Any] = {}
+    if Path(config_path).exists():
+        with open(config_path, "r") as f:
+            cfg_exp = yaml.safe_load(f) or {}
+            obs_noise_cfg = cfg_exp.get("observation_noise", {})
 
-    # 4. Run factor graph localization / SLAM
+    # 4. Simulate observations exclusively from meas_gt.jsonl
+    N = len(poses_gt)
+    detections_by_frame = [[] for _ in range(N)]
+    meas_gt_file = p_data / "meas_gt.jsonl"
+    rng = np.random.default_rng(seed)
+
+    if meas_gt_file.exists():
+        with open(meas_gt_file, "r") as f:
+            for line in f:
+                item = json.loads(line)
+                f_idx = item["frame_idx"]
+                if f_idx < N:
+                    obs = simulate_observation_noise(
+                        item=item,
+                        rng=rng,
+                        head=head,
+                        backbone=backbone,
+                        obs_noise_cfg=obs_noise_cfg,
+                    )
+                    detections_by_frame[f_idx].append(obs)
+
+    # 5. Run factor graph localization / SLAM
     is_oracle = (association == "oracle")
     if task == "localization":
         res = run_localization_known_map(
@@ -143,12 +194,10 @@ def run_experiment_trial(
             poses_gt, rel_noisy, covs, detections_by_frame,
             mode=mode, head_type=head
         )
+        print (res)
 
-    # Compile result record
     ate = res["ate_rmse"]
-    is_failure = bool(ate > 1.0)  # Failure threshold 1.0 m
-
-    # Compute drift to spacing ratio: drift_per_meter / average_spacing (1.5m)
+    is_failure = bool(ate > 1.0)
     drift_to_spacing = float(odometry_level / 1.5)
 
     return {
@@ -182,8 +231,6 @@ def run_experiment_matrix(
     cache_dir = Path(cfg.get("cache_dir", "results_cache"))
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    obs_cfg = _resolve_obs_noise_config(cfg)
-
     heads = cfg["heads"]
     backbones = cfg["backbones"]
     seeds = cfg["seeds"]
@@ -192,7 +239,6 @@ def run_experiment_matrix(
     associations = cfg["association"]
     odom_levels = cfg["odometry_noise_levels"]
     conditions = cfg["conditions"]
-    scene_name = cfg.get("scene", "room1_small_office")
 
     if smoke:
         heads = ["gaussian", "student_t", "cauchy"]
@@ -215,20 +261,11 @@ def run_experiment_matrix(
     print(f"Associations ({len(associations)}): {associations}")
     print(f"Odom Levels ({len(odom_levels)}): {odom_levels}")
     print(f"Conditions ({len(conditions)}): {conditions}")
-    print(f"Observation Noise Config: {obs_cfg}")
-
     total_combinations = (
         len(heads) * len(backbones) * len(seeds) * len(modes)
         * len(tasks) * len(associations) * len(odom_levels) * len(conditions)
     )
     print(f">>> Running Experiment Matrix: {total_combinations} total trials...")
-
-    if out_file.exists():
-        try:
-            existing_df = pd.read_parquet(out_file)
-            print(f"Loaded existing results cache with {len(existing_df)} completed runs.")
-        except Exception:
-            pass
 
     trial_idx = 0
     for head in heads:
@@ -241,37 +278,21 @@ def run_experiment_matrix(
                                 for cond in conditions:
                                     trial_idx += 1
                                     cache_key = f"{bb}_{head}_s{s}_{mode}_{task}_{assoc}_odom{odom}_{cond}"
-                                    cache_path = cache_dir / f"{cache_key}.json"
-
-                                    if cache_path.exists():
-                                        with open(cache_path, "r") as f:
-                                            record = json.load(f)
-                                    else:
-                                        record = run_experiment_trial(
-                                            head=head,
-                                            backbone=bb,
-                                            seed=s,
-                                            mode=mode,
-                                            task=task,
-                                            scene=scene_name,
-                                            condition=cond,
-                                            odometry_level=odom,
-                                            association=assoc,
-                                            data_dir=data_dir,
-                                            obs_cfg=obs_cfg,
-                                        )
-                                        with open(cache_path, "w") as f:
-                                            json.dump(record, f)
+                                    record = run_experiment_trial(
+                                        head=head, backbone=bb, seed=s, mode=mode,
+                                        task=task, scene="room1_small_office", condition=cond,
+                                        odometry_level=odom, association=assoc, data_dir=data_dir,
+                                        config_path=config_path
+                                    )
 
                                     records.append(record)
-                                    if trial_idx % 20 == 0 or trial_idx == total_combinations:
-                                        print(f"[{trial_idx}/{total_combinations}] Done: {cache_key} -> ATE={record['ate_rmse']:.3f}m")
+                                    # if trial_idx % 20 == 0 or trial_idx == total_combinations:
+                                    print(f"[{trial_idx}/{total_combinations}] Done: {cache_key} -> ATE={record['ate_rmse']:.3f}m")
 
     df = pd.DataFrame(records)
-    # df.to_parquet(out_file)
-    # print(f"\nMatrix execution complete. Saved {len(df)} rows to {out_file}")
+    df.to_parquet(out_file)
+    print(f"\nMatrix execution complete. Saved {len(df)} rows to {out_file}")
 
-    # Run Statistical Equivalence Tests
     print("\n=== Statistical Equivalence Analysis (ResNet-9 & 18 vs. ResNet-50) ===")
     for head in heads:
         subset = df[df["head"] == head]
