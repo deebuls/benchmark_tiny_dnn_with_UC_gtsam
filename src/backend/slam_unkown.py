@@ -21,6 +21,7 @@ Pipeline
 Note: odometry_covs must use GTSAM Pose3 ordering [rot(3), trans(3)].
 """
 
+import time
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -35,6 +36,8 @@ except ImportError:
 from src.common.geometry import measurement_to_point3d
 from src.backend.factors import MarkerMeasurementFactor, make_gtsam_marker_factor, compute_measurement_and_jacobians
 from src.backend.association import LandmarkTracker
+from src.backend.slam_metrics import (trajectory_metrics, pose_covariances, nees_metrics,
+                          residual_metrics, umeyama_se3)
 
 _NO_IRLS_HEADS = ["gaussian", "gaussian_beta", "mse_fixed"]
 
@@ -197,7 +200,7 @@ def _optimize(
     head_type: str,
     pose0_sigma: float = 0.01,
     lm_prior_sigma: float = 50.0,
-) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
+) -> Tuple[np.ndarray, Dict[int, np.ndarray], Dict[str, Any]]:
     graph = gtsam.NonlinearFactorGraph()
     init = gtsam.Values()
 
@@ -248,7 +251,8 @@ def _optimize(
 
     poses_new = np.stack([estimate.atPose3(symbol("x", i)).matrix() for i in range(upto + 1)])
     lms_new = {lid: np.asarray(estimate.atPoint3(symbol("l", lid)), dtype=np.float64) for lid in used}
-    return poses_new, lms_new
+    info = {"graph": g, "estimate": estimate, "helpers": helpers}  # for covariances / residual stats
+    return poses_new, lms_new, info
 
 
 # --------------------------------------------------------------------------- #
@@ -272,6 +276,8 @@ def run_slam_unknown_map(
     reopt_every: int = 10,
     final_reassociate: bool = True,
     lm_prior_sigma: float = 50.0,
+    compute_nees: bool = True,
+    rpe_deltas: Tuple[int, ...] = (1, 10),
 ) -> Dict[str, Any]:
     """
     Full SLAM: unknown landmarks, tentative tracking, joint optimisation.
@@ -286,6 +292,7 @@ def run_slam_unknown_map(
     if oracle and gts_by_frame is None:
         raise ValueError("oracle=True requires gts_by_frame.")
 
+    t_start = time.perf_counter()
     N = len(poses_gt)
     floor = np.asarray(pose_sigma_floor, dtype=np.float64)
     T0 = poses_gt[0].copy()
@@ -295,15 +302,17 @@ def run_slam_unknown_map(
     poses_est[0] = T0
     obs: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
     oracle_map: Dict[int, int] = {}  # marker_id -> track id
+    last_opt: Dict[str, Any] = {}   # info of the most recent batch solve
     stats = {"merges": 0, "optimizations": 0, "tentatives_created": 0}
 
     def reoptimize(upto: int) -> None:
         if not tracker.confirmed_landmarks:
             return
-        p_new, lms = _optimize(poses_est, upto, T0, odometry_poses, odometry_covs,
+        p_new, lms, info = _optimize(poses_est, upto, T0, odometry_poses, odometry_covs,
                                tracker.confirmed_landmarks, obs, mode, head_type,
                                lm_prior_sigma=lm_prior_sigma)
         poses_est[:upto + 1] = p_new
+        last_opt["info"], last_opt["upto"] = info, upto
         for lid, p in lms.items():
             tracker.confirmed_landmarks[lid] = p
         for lid, tr in tracker.tentative_landmarks.items():  # re-triangulate with refined poses
@@ -359,8 +368,9 @@ def run_slam_unknown_map(
                 new_obs[lid].append((f, detections_by_frame[f][d_idx]))
         new_obs = {lid: o for lid, o in new_obs.items() if len(o) >= min_obs}
         confirmed = {lid: tracker.confirmed_landmarks[lid] for lid in new_obs}
-        poses_est, lms = _optimize(poses_est, N - 1, T0, odometry_poses, odometry_covs,
+        poses_est, lms, last_opt["info"] = _optimize(poses_est, N - 1, T0, odometry_poses, odometry_covs,
                                    confirmed, new_obs, mode, head_type, lm_prior_sigma=lm_prior_sigma)
+        last_opt["upto"] = N - 1
         confirmed.update(lms)
         tracker.confirmed_landmarks = confirmed
         obs = new_obs
@@ -368,24 +378,33 @@ def run_slam_unknown_map(
     landmarks = {lid: p for lid, p in tracker.confirmed_landmarks.items() if obs.get(lid)}
 
     # ---- evaluation ----------------------------------------------------------
-    est_t, gt_t = poses_est[:, :3, 3], poses_gt[:, :3, 3]
-    errs = np.linalg.norm(est_t - gt_t, axis=-1)
-    R, t = _umeyama_se3(est_t, gt_t)
-    errs_aligned = np.linalg.norm((est_t @ R.T + t) - gt_t, axis=-1)
+    odom_only = np.zeros_like(poses_gt)            # dead-reckoning baseline
+    odom_only[0] = T0
+    for i in range(N - 1):
+        odom_only[i + 1] = odom_only[i] @ odometry_poses[i]
+
+    metrics = trajectory_metrics(poses_est, poses_gt, rpe_deltas=rpe_deltas, baseline=odom_only)
+    R, t = metrics["alignment_R"], metrics["alignment_t"]
+    info = last_opt.get("info")
 
     result: Dict[str, Any] = {
-        "ate_rmse": float(np.sqrt(np.mean(errs ** 2))),                 # anchored at GT frame 0
-        "ate_rmse_aligned": float(np.sqrt(np.mean(errs_aligned ** 2))),  # after SE(3) alignment
-        "max_error": float(errs.max()),
-        "per_frame_error": errs,
+        **metrics,
+        "ate_rmse_aligned": metrics["ate_aligned_rmse"],   # backwards compatible key
+        "max_error": metrics["ate_max"],                    # backwards compatible key
         "num_frames": N,
         "landmarks_confirmed": len(landmarks),
         "landmarks_tentative_left": len(tracker.tentative_landmarks),
-        "num_marker_factors": int(sum(len(o) for lid, o in obs.items() if lid in landmarks)),
         "estimated_poses": poses_est,
         "landmarks": landmarks,
         **stats,
     }
+    if info is not None:
+        result.update(residual_metrics(info["helpers"], info["estimate"]))
+        if compute_nees and last_opt.get("upto") == N - 1:
+            covs = pose_covariances(info["graph"], info["estimate"], N, symbol)
+            result.update(nees_metrics(poses_est, poses_gt, covs))
+            result["pose_covariances"] = covs
+    result["num_marker_factors"] = int(sum(len(o) for lid, o in obs.items() if lid in landmarks))
 
     if map_gt:
         gt_ids = list(map_gt.keys())
@@ -401,5 +420,9 @@ def run_slam_unknown_map(
                 "gt_landmarks_recovered": recovered,
                 "gt_landmarks_total": len(gt_ids),
                 "duplicate_or_spurious_landmarks": max(len(landmarks) - recovered, 0),
+                "landmark_recall": recovered / max(len(gt_ids), 1),
+                "landmark_precision": float((nn < 0.3).mean()),
+                "landmark_max_err": float(nn.max()),
             })
+    result["runtime_s"] = time.perf_counter() - t_start
     return result

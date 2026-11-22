@@ -5,6 +5,7 @@ custom robust weighting loops (Mode A and Mode B), and evaluation metrics (ATE, 
 """
 
 import json
+import time
 import argparse
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
@@ -22,6 +23,9 @@ from src.backend.association import DataAssociator, LandmarkTracker
 
 # Replacement core optimization & association block in run_localization_known_map
 from src.backend.factors import MarkerMeasurementFactor, make_gtsam_marker_factor
+# NOTE: move slam_metrics.py to src/backend/metrics.py and update this import if you like
+from src.backend.slam_metrics import (trajectory_metrics, pose_covariances, nees_metrics,
+                          residual_metrics, print_metrics)
 
 def run_localization_known_map(
     poses_gt: np.ndarray,
@@ -33,11 +37,14 @@ def run_localization_known_map(
     head_type: str = "student_t",
     oracle: bool = False,
     gts_by_frame: Optional[List[List[Dict[str, Any]]]] = None,
+    compute_nees: bool = True,
+    rpe_deltas: Tuple[int, ...] = (1, 10),
 ) -> Dict[str, Any]:
     """
     Runs factor-graph localization with a known landmark map.
     Returns estimated trajectory and ATE (Absolute Trajectory Error).
     """
+    t_start = time.perf_counter()
     N = len(poses_gt)
     associator = DataAssociator(head_type=head_type)
 
@@ -162,16 +169,23 @@ def run_localization_known_map(
         est_poses[i, :3, :3] = p_opt.rotation().matrix()
         est_poses[i, :3, 3] = p_opt.translation()
 
-    # Compute ATE RMSE
-    trans_errs = np.linalg.norm(est_poses[:, :3, 3] - poses_gt[:, :3, 3], axis=-1)
-    ate_rmse = float(np.sqrt(np.mean(trans_errs**2)))
+    # ---- Metrics -------------------------------------------------------------
+    metrics = trajectory_metrics(est_poses, poses_gt, rpe_deltas=rpe_deltas,
+                                 baseline=odom_poses_world)   # baseline = odometry-only dead reckoning
+    metrics.update(residual_metrics(marker_helpers, result))
+    if compute_nees:
+        covs = pose_covariances(iter_graph, result, N, symbol)
+        metrics.update(nees_metrics(est_poses, poses_gt, covs))
+        metrics["pose_covariances"] = covs
 
     return {
-        "ate_rmse": ate_rmse,
-        "max_error": float(np.max(trans_errs)),
+        **metrics,   # ate_rmse, ate_aligned_rmse, ate_rot_deg_rmse, rpe_*, drift_percent, anees*, ...
+        "max_error": metrics["ate_max"],   # backwards compatible key
         "accepted_associations": num_accepted_associations,
+        "num_landmarks_used": len(unique_landmarks_to_add),
         "num_frames": N,
         "estimated_poses": est_poses,
+        "runtime_s": time.perf_counter() - t_start,
     }
 
 def run_slam_unknown_map(
@@ -269,9 +283,6 @@ if __name__ == "__main__":
         poses_gt, odom["relative_poses"], odom["covariances"],
         detections_by_frame, map_landmarks, mode=args.mode, head_type=args.head, oracle=args.oracle
     )
-    print("=" * 60)
-    print(f"Localization Result (Backbone: {args.backbone}, Head: {args.head}, Mode: {args.mode}):")
-    print(f"  ATE RMSE:               {res['ate_rmse']:.4f} m")
-    print(f"  Accepted Associations:  {res.get('accepted_associations', 0)}")
-    print(f"  Total Frames:           {res.get('num_frames', N)}")
-    print("=" * 60)
+    print_metrics(res, f"Localization (Backbone: {args.backbone}, Head: {args.head}, Mode: {args.mode})")
+    print(f"  Accepted associations       : {res.get('accepted_associations', 0)}")
+    print(f"  Landmarks used / frames     : {res.get('num_landmarks_used', 0)} / {res.get('num_frames', N)}")

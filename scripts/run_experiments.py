@@ -41,7 +41,7 @@ def run_experiment_trial(
     dev = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
 
     # 1. Load ground truth trajectory & data
-    p_data = Path(data_dir)
+    p_data = Path(data_dir+condition)
     poses_gt = np.load(str(p_data / "poses_gt.npy"))
     markers_gt = np.load(str(p_data / "markers_gt.npy"))
     map_landmarks = {int(m[0]): m[1:] for m in markers_gt}
@@ -55,6 +55,8 @@ def run_experiment_trial(
     if not ckpt_path.exists():
         # Fallback to seed 42 or smoke
         ckpt_path = Path(checkpoint_dir) / f"{backbone}_{head}_seed42" / "model_final.pt"
+        print (f"checkppoint missing : {ckpt_path}");
+        exit
 
     # Compute network detections or synthetic simulated observations
     N = len(poses_gt)
@@ -78,37 +80,39 @@ def run_experiment_trial(
                 dets = model.predict(t_img, score_threshold=0.3)[0]
             detections_by_frame[i] = dets
     else:
-        # Fallback observation simulation from meas_gt.jsonl
-        meas_gt_file = p_data / "meas_gt.jsonl"
-        rng = np.random.default_rng(seed)
-        if meas_gt_file.exists():
-            with open(meas_gt_file, "r") as f:
-                for line in f:
-                    item = json.loads(line)
-                    f_idx = item["frame_idx"]
-                    if f_idx < N:
-                        # Corrupt ground truth by head noise profile
-                        sigma_mult = 1.0 if backbone == "resnet50" else (1.2 if backbone == "resnet18" else 1.5)
-                        s_az = 0.02 * sigma_mult
-                        s_el = 0.02 * sigma_mult
-                        s_rho = 0.05 * sigma_mult
-
-                        d_az = rng.normal(0, s_az)
-                        d_el = rng.normal(0, s_el)
-                        d_rho = rng.normal(0, s_rho)
-
-                        detections_by_frame[f_idx].append({
-                            "pixel_center": item["pixel_center"],
-                            "azimuth": float(item["azimuth"] + d_az),
-                            "elevation": float(item["elevation"] + d_el),
-                            "rho": float(max(0.1, item["rho"] + d_rho)),
-                            "scale_azimuth": s_az,
-                            "scale_elevation": s_el,
-                            "scale_rho": s_rho,
-                            "nu_azimuth": 3.0,
-                            "nu_elevation": 3.0,
-                            "nu_rho": 3.0,
-                        })
+        print ("Missing model or image")
+        exit()
+        # # Fallback observation simulation from meas_gt.jsonl
+        # meas_gt_file = p_data / "meas_gt.jsonl"
+        # rng = np.random.default_rng(seed)
+        # if meas_gt_file.exists():
+        #     with open(meas_gt_file, "r") as f:
+        #         for line in f:
+        #             item = json.loads(line)
+        #             f_idx = item["frame_idx"]
+        #             if f_idx < N:
+        #                 # Corrupt ground truth by head noise profile
+        #                 sigma_mult = 1.0 if backbone == "resnet50" else (1.2 if backbone == "resnet18" else 1.5)
+        #                 s_az = 0.02 * sigma_mult
+        #                 s_el = 0.02 * sigma_mult
+        #                 s_rho = 0.05 * sigma_mult
+        #
+        #                 d_az = rng.normal(0, s_az)
+        #                 d_el = rng.normal(0, s_el)
+        #                 d_rho = rng.normal(0, s_rho)
+        #
+        #                 detections_by_frame[f_idx].append({
+        #                     "pixel_center": item["pixel_center"],
+        #                     "azimuth": float(item["azimuth"] + d_az),
+        #                     "elevation": float(item["elevation"] + d_el),
+        #                     "rho": float(max(0.1, item["rho"] + d_rho)),
+        #                     "scale_azimuth": s_az,
+        #                     "scale_elevation": s_el,
+        #                     "scale_rho": s_rho,
+        #                     "nu_azimuth": 3.0,
+        #                     "nu_elevation": 3.0,
+        #                     "nu_rho": 3.0,
+        #                 })
 
     # 4. Run factor graph localization / SLAM
     is_oracle = (association == "oracle")
@@ -123,12 +127,38 @@ def run_experiment_trial(
             mode=mode, head_type=head
         )
 
-    # Compile result record
+    # Scalar metrics to store per run (missing keys -> NaN, e.g. NEES unavailable or no map_gt)
+    METRIC_KEYS = [
+        # ATE
+        "ate_mean", "ate_median", "ate_std", "ate_max",
+        "ate_aligned_rmse",
+        "ate_rot_deg_rmse", "ate_rot_deg_max",
+        # RPE (deltas must match rpe_deltas, default (1, 10))
+        "rpe_trans_d1_rmse", "rpe_rot_deg_d1_rmse",
+        "rpe_trans_d10_rmse", "rpe_rot_deg_d10_rmse",
+        # Drift / baseline
+        "path_length_m", "final_error_m", "drift_percent",
+        "ate_rmse_baseline", "ate_improvement_percent",
+        # Consistency (NEES)
+        "anees", "anees_normalized", "nees_frac_in_bounds",
+        "anees_trans_normalized", "anees_rot_normalized",
+        # Factor health
+        "mean_whitened_chi2", "outlier_ratio",
+        "mean_irls_weight", "downweighted_ratio",
+        # Unknown-map only
+        "landmark_rmse", "landmark_recall", "landmark_precision",
+        "landmarks_confirmed", "duplicate_or_spurious_landmarks",
+        # Cost
+        "runtime_s",
+    ]
+
+    def _scalar(res, key):
+        v = res.get(key, float("nan"))
+        return float(v) if v is not None else float("nan")
+
+# Compile result record
     ate = res["ate_rmse"]
     is_failure = bool(ate > 1.0)  # Failure threshold 1.0 m
-
-    # Compute drift to spacing ratio: drift_per_meter * average_spacing
-    # E.g., at 0.01 drift and 1.5m spacing: 0.01 / 1.5
     drift_to_spacing = float(odometry_level / 1.5)
 
     record = {
@@ -144,9 +174,12 @@ def run_experiment_trial(
         "association": association,
         "ate_rmse": float(ate),
         "is_failure": is_failure,
-        "accepted_associations": res.get("accepted_associations", 0),
+        # the unknown-map runner has no "accepted_associations"; fall back to its factor count
+        "accepted_associations": res.get("accepted_associations", res.get("num_marker_factors", 0)),
         "num_frames": N,
+        **{k: _scalar(res, k) for k in METRIC_KEYS},
     }
+
     return record
 
 
@@ -233,6 +266,7 @@ def run_experiment_matrix(
                                             json.dump(record, f)
 
                                     records.append(record)
+                                    print(f"[{trial_idx}/{total_combinations}] Done: {cache_key} -> ATE={record['ate_rmse']:.3f}m")
                                     if trial_idx % 20 == 0 or trial_idx == total_combinations:
                                         print(f"[{trial_idx}/{total_combinations}] Done: {cache_key} -> ATE={record['ate_rmse']:.3f}m")
 
@@ -258,7 +292,7 @@ def run_experiment_matrix(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Full Experiment Matrix")
     parser.add_argument("--config", type=str, default="configs/experiments.yaml")
-    parser.add_argument("--data_dir", type=str, default="data/blender/room1_medium_nominal")
+    parser.add_argument("--data_dir", type=str, default="data/blender/room1_") #This is added with condition room1_nominal , room1_low_light
     parser.add_argument("--smoke", action="store_true", help="Run rapid smoke experiment matrix")
     args = parser.parse_args()
 

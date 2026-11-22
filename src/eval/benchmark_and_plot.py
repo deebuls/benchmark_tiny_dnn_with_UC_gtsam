@@ -27,17 +27,17 @@ from src.eval.interval_score import compute_interval_score
 def evaluate_all_checkpoints(
     checkpoints_dir: str = "checkpoints",
     val_data_dir: str = "data/blender/room1_medium_nominal",
-    cache_file: str = "val_benchmark_results.json",
+    #cache_file: str = "val_benchmark_results.json",
     force_reeval: bool = False,
 ) -> List[Dict[str, Any]]:
     """Evaluates all found checkpoints and returns consolidated metric rows."""
     ckpt_root = Path(checkpoints_dir)
-    cache_path = Path(cache_file)
+    # cache_path = Path(cache_file)
 
-    if cache_path.exists() and not force_reeval:
-        print(f"Loading cached validation results from {cache_path}")
-        with open(cache_path, "r") as f:
-            return json.load(f)
+    # if cache_path.exists() and not force_reeval:
+    #     print(f"Loading cached validation results from {cache_path}")
+    #     with open(cache_path, "r") as f:
+    #         return json.load(f)
 
     # Find all model_final.pt files
     model_files = sorted(ckpt_root.glob("*/model_final.pt"))
@@ -302,11 +302,11 @@ def main():
     out_p = Path(args.out_dir)
     out_p.mkdir(parents=True, exist_ok=True)
 
-    cache_file = str(out_p / "val_metrics_cache.json")
+    #cache_file = str(out_p / "val_metrics_cache.json")
     records = evaluate_all_checkpoints(
         checkpoints_dir=args.checkpoints_dir,
         val_data_dir=args.val_data_dir,
-        cache_file=cache_file,
+    #    cache_file=cache_file,
         force_reeval=args.force,
     )
 

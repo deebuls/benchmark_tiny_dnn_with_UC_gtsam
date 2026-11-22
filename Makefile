@@ -6,7 +6,7 @@ BACKBONE ?= resnet18
 EPOCHS ?= 40
 SEED ?= 42
 MODE ?= B
-VAL_DIR ?= data/blender/room1_medium_nominal
+VAL_DIR ?= data/blender/room1_
 
 all: test
 
@@ -19,7 +19,9 @@ synth:
 	PYTHONPATH=. $(PYTHON) src/synth/generate.py --split val   --num_images 1000  --workers 4 --out_dir data/synth/val
 	PYTHONPATH=. $(PYTHON) src/synth/generate.py --split calib --num_images 1000  --workers 4 --out_dir data/synth/calib
 	@echo ">>> Generating all 3 validation scenes/rooms..."
-	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room1_small_office --density medium --condition nominal --frames 300 --out_dir data/blender/room1_medium_nominal
+	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room1_small_office --density medium --condition nominal --frames 300 --out_dir data/blender/room1_nominal
+	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room1_small_office --density medium --condition motion_blur --frames 300 --out_dir data/blender/room1_motion_blur
+	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room1_small_office --density medium --condition low_light --frames 300 --out_dir data/blender/room1_low_light
 	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room2_lab_narrow   --density medium --condition nominal --frames 300 --out_dir data/blender/room2_lab_narrow
 	PYTHONPATH=. $(PYTHON) src/blender/render.py --room room3_square_hall  --density medium --condition nominal --frames 300 --out_dir data/blender/room3_square_hall
 
@@ -153,16 +155,9 @@ video-all:
 	PYTHONPATH=. $(PYTHON) src/plots/make_video.py --all
 
 plots:
-	PYTHONPATH=. $(PYTHON) src/plots/make_paper_figures.py
-
-paper-video:
-	PYTHONPATH=. $(PYTHON) src/plots/make_video.py --backbone $(BACKBONE) --head $(HEAD) --mode $(MODE)
-
-video-all:
-	PYTHONPATH=. $(PYTHON) src/plots/make_video.py --all
-
-plots:
-	PYTHONPATH=. $(PYTHON) src/plots/make_paper_figures.py
+	#PYTHONPATH=. $(PYTHON) src/plots/make_paper_figures.py
+	PYTHONPATH=. $(PYTHON) src/plots/make_capacity_benchmark.py --results results.parquet --out_dir reports/paper_figures
+	PYTHONPATH=. $(PYTHON) src/plots/make_metric_figures.py --results results.parquet --out_dir reports/paper_figures
 
 smoke:
 	$(PYTHON) scripts/run_smoke.py

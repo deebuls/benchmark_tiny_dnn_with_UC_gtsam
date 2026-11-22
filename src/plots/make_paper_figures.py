@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 from src.plots.style import (
     apply_paper_style,
-    save_figure,
+
     HEAD_COLORS,
     SIZE_MARKERS,
     SIZE_LINESTYLES,
@@ -32,67 +32,70 @@ def load_or_create_results_df(parquet_path: str) -> pd.DataFrame:
                 return df
         except Exception as e:
             print(f"Notice reading {parquet_path}: {e}")
+    else:
+        print ("No paraquet file ")
+        exit()
 
     # Fallback to loading cached results from results_cache/ or val_metrics_cache.json
-    cache_dir = Path("results_cache")
-    records = []
-    if cache_dir.exists():
-        for f in cache_dir.glob("*.json"):
-            try:
-                with open(f, "r") as fp:
-                    records.append(json.load(fp))
-            except Exception:
-                pass
+    # cache_dir = Path("results_cache")
+    # records = []
+    # if cache_dir.exists():
+    #     for f in cache_dir.glob("*.json"):
+    #         try:
+    #             with open(f, "r") as fp:
+    #                 records.append(json.load(fp))
+    #         except Exception:
+    #             pass
+    #
+    # if records:
+    #     df = pd.DataFrame(records)
+    #     df.to_parquet(p)
+    #     return df
 
-    if records:
-        df = pd.DataFrame(records)
-        df.to_parquet(p)
-        return df
-
-    # Synthetic realistic mock matrix for generation if no experimental runs yet
-    print("Generating comprehensive benchmark dataframe from experiment configuration...")
-    heads = ["gaussian", "gaussian_beta", "student_t", "student_t_fixed", "cauchy", "mse_fixed"]
-    backbones = ["resnet9"]
-    drifts = [0.005, 0.050]
-    conditions = ["nominal", "motion_blur", "low_light", "occlusion", "distractors"]
-    modes = ["A", "B"]
-
-    rows = []
-    rng = np.random.default_rng(42)
-
-    for h in heads:
-        for bb in backbones:
-            base_ate = 0.08 if h in ["student_t", "cauchy"] else 0.12
-            if bb == "resnet9":
-                base_ate += (0.02 if h in ["student_t", "cauchy"] else 0.08)
-            elif bb == "resnet18":
-                base_ate += 0.01
-            for d in drifts:
-                for cond in conditions:
-                    for m in modes:
-                        cond_factor = 1.0 if cond == "nominal" else (1.4 if h in ["student_t", "cauchy"] else 2.2)
-                        mode_factor = 1.0 if m == "B" else (1.2 if h in ["student_t", "cauchy"] else 1.0)
-                        ate = (base_ate + d * 5.0) * cond_factor * mode_factor + rng.normal(0, 0.01)
-                        ate = max(0.02, ate)
-                        is_fail = ate > 1.0
-                        rows.append({
-                            "head": h,
-                            "backbone": bb,
-                            "mode": m,
-                            "condition": cond,
-                            "odometry_level": d,
-                            "drift_to_spacing": d / 1.5,
-                            "ate_rmse": float(ate),
-                            "is_failure": is_fail,
-                            "precision": 0.95 if cond == "nominal" else 0.85,
-                            "recall": 0.92 if cond == "nominal" else 0.78,
-                            "parameters": 2.1e6 if bb == "resnet9" else (11.7e6 if bb == "resnet18" else 25.6e6),
-                            "latency_ms": 4.5 if bb == "resnet9" else (8.2 if bb == "resnet18" else 18.5),
-                        })
-
-    df = pd.DataFrame(rows)
-    df.to_parquet(p)
-    return df
+    # # Synthetic realistic mock matrix for generation if no experimental runs yet
+    # print("Generating comprehensive benchmark dataframe from experiment configuration...")
+    # heads = ["gaussian", "gaussian_beta", "student_t", "student_t_fixed", "cauchy", "mse_fixed"]
+    # backbones = ["resnet9"]
+    # drifts = [0.005, 0.050]
+    # conditions = ["nominal", "motion_blur", "low_light", "occlusion", "distractors"]
+    # modes = ["A", "B"]
+    #
+    # rows = []
+    # rng = np.random.default_rng(42)
+    #
+    # for h in heads:
+    #     for bb in backbones:
+    #         base_ate = 0.08 if h in ["student_t", "cauchy"] else 0.12
+    #         if bb == "resnet9":
+    #             base_ate += (0.02 if h in ["student_t", "cauchy"] else 0.08)
+    #         elif bb == "resnet18":
+    #             base_ate += 0.01
+    #         for d in drifts:
+    #             for cond in conditions:
+    #                 for m in modes:
+    #                     cond_factor = 1.0 if cond == "nominal" else (1.4 if h in ["student_t", "cauchy"] else 2.2)
+    #                     mode_factor = 1.0 if m == "B" else (1.2 if h in ["student_t", "cauchy"] else 1.0)
+    #                     ate = (base_ate + d * 5.0) * cond_factor * mode_factor + rng.normal(0, 0.01)
+    #                     ate = max(0.02, ate)
+    #                     is_fail = ate > 1.0
+    #                     rows.append({
+    #                         "head": h,
+    #                         "backbone": bb,
+    #                         "mode": m,
+    #                         "condition": cond,
+    #                         "odometry_level": d,
+    #                         "drift_to_spacing": d / 1.5,
+    #                         "ate_rmse": float(ate),
+    #                         "is_failure": is_fail,
+    #                         "precision": 0.95 if cond == "nominal" else 0.85,
+    #                         "recall": 0.92 if cond == "nominal" else 0.78,
+    #                         "parameters": 2.1e6 if bb == "resnet9" else (11.7e6 if bb == "resnet18" else 25.6e6),
+    #                         "latency_ms": 4.5 if bb == "resnet9" else (8.2 if bb == "resnet18" else 18.5),
+    #                     })
+    #
+    # df = pd.DataFrame(rows)
+    # df.to_parquet(p)
+    # return df
 
 
 def fig3_per_measurement_nll_crps(df: pd.DataFrame, out_path: Path):
