@@ -124,8 +124,8 @@ def evaluate_all_checkpoints(
             print(f"Error evaluating {folder_name}: {e}")
 
     # Save cache
-    with open(cache_path, "w") as f:
-        json.dump(records, f, indent=2)
+    # with open(cache_path, "w") as f:
+    #     json.dump(records, f, indent=2)
 
     return records
 
@@ -294,7 +294,7 @@ def plot_separated_metrics(df: pd.DataFrame, out_dir: Path) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Plot Validation Metrics (RMSE, CRPS, Interval Score)")
     parser.add_argument("--checkpoints_dir", type=str, default="checkpoints")
-    parser.add_argument("--val_data_dir", type=str, default="data/blender/room1_medium_nominal")
+    parser.add_argument("--val_data_dir", type=str, default="data/blender/room1_")
     parser.add_argument("--out_dir", type=str, default="reports/validation_benchmark")
     parser.add_argument("--force", action="store_true", help="Force re-evaluation of all checkpoints")
     args = parser.parse_args()

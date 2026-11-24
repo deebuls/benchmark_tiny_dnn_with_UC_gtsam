@@ -74,7 +74,7 @@ def evaluate_checkpoint_on_dataset(
     model.eval()
 
     # Load Ground Truth
-    p_data = Path(data_dir_condition)
+    p_data = Path(data_dir + "nominal")
     meas_gt_file = p_data / "meas_gt.jsonl"
     if not meas_gt_file.exists():
         meas_gt_file = p_data / "annotations.jsonl"

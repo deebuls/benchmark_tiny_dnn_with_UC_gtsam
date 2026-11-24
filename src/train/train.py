@@ -150,6 +150,118 @@ def evaluate_validation_epoch(
     return val_metrics
 
 
+def build_model_from_config(config: Dict[str, Any], device: torch.device) -> MarkerModel:
+    """Builds a MarkerModel exactly like train_model does."""
+    return MarkerModel(
+        backbone_type=config["backbone"]["type"],
+        head_type=config["head"]["type"],
+        neck_channels=config["backbone"].get("neck_channels", 128),
+        head_channels=config["backbone"].get("head_channels", 128),
+        fixed_nu=config["head"].get("fixed_nu", 3.0),
+        log_scale_min=config["head"].get("log_scale_min", -7.0),
+        log_scale_max=config["head"].get("log_scale_max", 5.0),
+    ).to(device)
+
+
+def val_model(
+    config: Dict[str, Any],
+    val_dir: str,
+    checkpoint_path: str,
+    output_path: Optional[str] = None,
+    batch_size: Optional[int] = None,
+    device: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Loads a trained checkpoint, runs it over the validation set (same dataset / loader
+    settings as train_model) and saves a JSON into `val_dir` containing:
+      - summary metrics (identical to the end-of-training validation summary)
+      - per-marker raw predictions (mu, log_scale, nu, target) at every GT center pixel,
+        which is what the uncertainty-quality plots (CRPS / interval score / coverage) need.
+    Returns the result dict. Default JSON name: <val_dir>/val_predictions_<ckpt_dir>_<ckpt_stem>.json
+    """
+    ckpt = Path(checkpoint_path)
+    head_type = config["head"]["type"]
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() and config.get("device") == "cuda" else "cpu"
+    device = torch.device(device)
+
+    val_ds = MarkerDataset(val_dir, is_train=False)
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size or config.get("batch_size", 8),
+        shuffle=False,  # order must match dataset order -> annotations.jsonl
+        num_workers=config.get("num_workers", 2),
+    )
+
+    model = build_model_from_config(config, device)
+    state = torch.load(str(ckpt), map_location=device)
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    model.load_state_dict(state)
+    model.eval()
+
+    summary = evaluate_validation_epoch(model, val_loader, device, head_type)
+
+    records = []
+    img_hw, hm_hw = None, None
+    img_counter = 0
+    with torch.no_grad():
+        for batch in val_loader:
+            imgs = batch["image"].to(device)
+            reg_mask = batch["reg_mask"].to(device)
+            reg_target = batch["reg_target"].to(device)
+            preds = model(imgs)
+            mu = preds["mu"]
+            log_scale = preds.get("log_scale")
+            nu = preds.get("nu")
+            img_hw = list(imgs.shape[-2:])
+            hm_hw = list(mu.shape[-2:])
+            file_names = batch.get("file_name") if isinstance(batch, dict) else None
+
+            for b in range(imgs.shape[0]):
+                for yx in torch.nonzero(reg_mask[b, 0] > 0):
+                    y, x = int(yx[0]), int(yx[1])
+                    rec = {
+                        "image_index": img_counter + b,
+                        "y": y,
+                        "x": x,
+                        "mu": mu[b, :, y, x].float().cpu().tolist(),
+                        "target": reg_target[b, :, y, x].float().cpu().tolist(),
+                        "log_scale": log_scale[b, :, y, x].float().cpu().tolist() if log_scale is not None else None,
+                        "nu": nu[b, :, y, x].float().cpu().tolist() if nu is not None else None,
+                    }
+                    if file_names is not None:
+                        rec["file_name"] = file_names[b]
+                    records.append(rec)
+            img_counter += imgs.shape[0]
+
+    result = {
+        "meta": {
+            "checkpoint": str(ckpt),
+            "backbone": config["backbone"]["type"],
+            "head": head_type,
+            "seed": config.get("seed"),
+            "fixed_nu": config["head"].get("fixed_nu", 3.0),
+            "val_dir": str(val_dir),
+            "n_images": img_counter,
+            "n_markers": len(records),
+            "input_hw": img_hw,
+            "heatmap_hw": hm_hw,
+            "channels": ["delta_azimuth_rad", "delta_elevation_rad", "log_rho"],
+        },
+        "summary_metrics": summary,
+        "predictions": records,
+    }
+
+    if output_path is None:
+        output_path = str(Path(val_dir) / f"val_predictions_{ckpt.parent.name}_{ckpt.stem}.json")
+    with open(output_path, "w") as f:
+        json.dump(result, f)
+    result["meta"]["output_path"] = str(output_path)
+    print(f"Saved validation predictions ({len(records)} markers) to {output_path}")
+    return result
+
+
 def train_model(
     config: Dict[str, Any],
     train_dir: str,

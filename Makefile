@@ -3,10 +3,11 @@
 PYTHON ?= python3
 HEAD ?= gaussian
 BACKBONE ?= resnet18
-EPOCHS ?= 40
+EPOCHS ?= 100
 SEED ?= 42
 MODE ?= B
 VAL_DIR ?= data/blender/room1_
+SYNTH_VAL_DIR ?= data/synth/val
 
 all: test
 
@@ -30,7 +31,7 @@ train:
 
 train-all:
 	@echo ">>> Training ALL 18 model combinations (6 heads x 3 backbones)..."
-	for bb in resnet50; do \
+	for bb in resnet50 resnet18 resnet9; do \
 		for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
 			echo "============================================================"; \
 			echo ">>> Training Backbone: $$bb | Head: $$head (Epochs: $(EPOCHS), Seed: $(SEED))"; \
@@ -57,6 +58,26 @@ train-matrix-smoke:
 		done \
 	done
 
+val-all:
+	@echo ">>> Validating ALL 18 model combinations on validation set..."
+	for bb in resnet9 resnet18 resnet50; do \
+		for head in gaussian gaussian_beta student_t student_t_fixed cauchy mse_fixed; do \
+			ckpt="checkpoints/$${bb}_$${head}_seed$(SEED)/model_final.pt"; \
+			out_json="checkpoints/$${bb}_$${head}_seed$(SEED)/eval_results.json"; \
+			if [ -f "$$ckpt" ]; then \
+				echo "============================================================"; \
+				echo ">>> Validating Backbone: $$bb | Head: $$head"; \
+				echo "============================================================"; \
+				PYTHONPATH=. $(PYTHON) scripts/run_val.py --model_path "$$ckpt" --val_dir $(SYNTH_VAL_DIR) ; \
+			else \
+				echo "Skipping missing checkpoint: $$ckpt"; \
+			fi \
+		done \
+	done
+
+plot-validation:
+	PYTHONPATH=. $(PYTHON) scripts/plot_val_uncertainty.py --val_dir $(SYNTH_VAL_DIR) --preds data/synth/val/val_predictions_*.json; \
+	
 blender:
 	$(PYTHON) scripts/run_stage.py --stage blender
 
