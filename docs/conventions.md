@@ -35,3 +35,6 @@ For a landmark located at camera-frame position $\mathbf{p} = (x, y, z)^\top$:
 - Operating depth range: $0.5\text{ m}$ to $6.0\text{ m}$ ($\rho \in [0.1667, 2.0]\text{ m}^{-1}$).
 - Maximum viewing angle: $75^\circ$ between marker normal and view ray.
 - Measurement target: exact logo center in 3D. Marker orientation is not used for measurement to eliminate PnP pose ambiguity.
+
+## 5. Loss function
+- The guassian loss function log_scale is variance or sd ?
